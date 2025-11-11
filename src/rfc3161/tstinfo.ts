@@ -48,8 +48,13 @@ export class TSTInfo {
   }
 
   public async verify(data: Uint8Array): Promise<void> {
-    const digest = await crypto.subtle.digest(this.messageImprintHashAlgorithm, toArrayBuffer(data));
-    if (!bufferEqual(new Uint8Array(digest), this.messageImprintHashedMessage)) {
+    const digest = await crypto.subtle.digest(
+      this.messageImprintHashAlgorithm,
+      toArrayBuffer(data),
+    );
+    if (
+      !bufferEqual(new Uint8Array(digest), this.messageImprintHashedMessage)
+    ) {
       throw new RFC3161TimestampVerificationError(
         "message imprint does not match artifact",
       );
