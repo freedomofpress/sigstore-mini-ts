@@ -83,3 +83,15 @@ export interface TimestampVerificationData {
 export interface RFC3161Timestamp {
   signedTimestamp: string; // Base64-encoded RFC3161 SignedData
 }
+
+export interface InTotoStatement {
+  _type: string;
+  subject: InTotoSubject[];
+  predicateType: string;
+  predicate: Record<string, unknown>;
+}
+
+export interface InTotoSubject {
+  name: string;
+  digest: Record<string, string>;
+}
