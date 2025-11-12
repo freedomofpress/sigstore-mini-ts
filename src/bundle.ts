@@ -1,9 +1,11 @@
-export interface SigstoreBundle {
+type SigstoreBundleBase = {
   mediaType: string;
   verificationMaterial: VerificationMaterial;
-  messageSignature?: MessageSignature;
-  dsseEnvelope?: DSSEEnvelope;
-}
+};
+
+export type SigstoreBundle =
+  | (SigstoreBundleBase & { messageSignature: MessageSignature; dsseEnvelope?: never })
+  | (SigstoreBundleBase & { messageSignature?: never; dsseEnvelope: DSSEEnvelope });
 
 export interface VerificationMaterial {
   certificate?: Certificate;
@@ -82,4 +84,16 @@ export interface TimestampVerificationData {
 
 export interface RFC3161Timestamp {
   signedTimestamp: string; // Base64-encoded RFC3161 SignedData
+}
+
+export interface InTotoStatement {
+  _type: string;
+  subject: InTotoSubject[];
+  predicateType: string;
+  predicate: Record<string, unknown>;
+}
+
+export interface InTotoSubject {
+  name: string;
+  digest: Record<string, string>;
 }
