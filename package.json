@@ -1,9 +1,15 @@
 {
-  "name": "sigstor-mini-ts",
-  "version": "0.1",
-  "description": "A Sigstore minal verifier, with node and browser support.",
-  "main": "dist/cli.js",
+  "name": "sigstore-browser",
+  "version": "0.1.0",
+  "description": "A minimal browser-only Sigstore verification library.",
+  "main": "dist/index.js",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
