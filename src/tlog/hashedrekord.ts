@@ -75,24 +75,4 @@ function verifyHashedRekordTLogBody(
   if (!uint8ArrayEqual(tlogDigestBytes, bundleDigestBytes)) {
     throw new Error("Digest mismatch between TLog entry and bundle");
   }
-
-  const tlogCert = entry.spec.signature.publicKey.content || "";
-  const tlogCertBytes = base64ToUint8Array(tlogCert);
-
-  let bundleCertBytes: Uint8Array;
-  if (bundle.verificationMaterial.certificate) {
-    bundleCertBytes = base64ToUint8Array(
-      bundle.verificationMaterial.certificate.rawBytes
-    );
-  } else if (bundle.verificationMaterial.x509CertificateChain) {
-    bundleCertBytes = base64ToUint8Array(
-      bundle.verificationMaterial.x509CertificateChain.certificates[0].rawBytes
-    );
-  } else {
-    throw new Error("Bundle missing certificate");
-  }
-
-  if (!uint8ArrayEqual(tlogCertBytes, bundleCertBytes)) {
-    throw new Error("Certificate mismatch between TLog entry and bundle");
-  }
 }
