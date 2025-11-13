@@ -7,6 +7,7 @@ import { SigstoreBundle } from "../src/bundle.js";
 import { base64ToUint8Array, Uint8ArrayToHex } from "../src/encoding.js";
 import { TrustedRoot } from "../src/interfaces.js";
 import { SigstoreVerifier } from "../src/sigstore.js";
+import defaultTrustedRoot from "../src/default-trusted-root.json" with { type: "json" };
 
 // Ensure the global Web Crypto implementation is available when running under Node.js
 if (typeof globalThis.crypto === "undefined") {
@@ -17,7 +18,7 @@ interface CLIOptions {
   bundlePath: string;
   certificateIdentity: string;
   certificateOidcIssuer: string;
-  trustedRootPath: string;
+  trustedRootPath: string | undefined;
   artifactInput: string;
 }
 
@@ -120,10 +121,6 @@ function parseArgs(argv: string[]): CLIOptions {
     throw new Error("Missing required option --certificate-oidc-issuer");
   }
 
-  if (!options.trustedRootPath) {
-    throw new Error("Missing required option --trusted-root");
-  }
-
   return {
     bundlePath: options.bundlePath,
     certificateIdentity: options.certificateIdentity,
@@ -169,7 +166,12 @@ async function resolveArtifact(input: string): Promise<ArtifactInput> {
   };
 }
 
-async function loadTrustedRoot(pathInput: string): Promise<TrustedRoot> {
+async function loadTrustedRoot(
+  pathInput: string | undefined,
+): Promise<TrustedRoot> {
+  if (!pathInput) {
+    return defaultTrustedRoot as TrustedRoot;
+  }
   const resolvedPath = path.resolve(pathInput);
   const raw = await readFile(resolvedPath, "utf8");
   return JSON.parse(raw) as TrustedRoot;
