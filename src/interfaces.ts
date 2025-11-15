@@ -33,9 +33,18 @@ export interface RawTimestampAuthority {
   };
 }
 
+export interface CTLog {
+  logID: Uint8Array;
+  publicKey: CryptoKey;
+  validFor: {
+    start: Date;
+    end: Date;
+  };
+}
+
 export interface Sigstore {
-  rekor: CryptoKey;
-  ctfe: CryptoKey;
+  rekor: CryptoKey | undefined;
+  ctlogs: CTLog[];
   fulcio: X509Certificate;
   // This is theoretically supported, but not implemented in the community sigstore
   // See https://github.com/sigstore/root-signing/issues/1389
@@ -74,7 +83,7 @@ export interface RawCA {
   };
   validFor: {
     start: string;
-    end: string;
+    end?: string;
   };
 }
 

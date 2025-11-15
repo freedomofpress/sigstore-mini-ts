@@ -23,6 +23,7 @@ import {
   X509AuthorityKeyIDExtension,
   X509BasicConstraintsExtension,
   X509Extension,
+  X509FulcioIssuerV1,
   X509FulcioIssuerV2,
   X509KeyUsageExtension,
   X509SCTExtension,
@@ -36,7 +37,8 @@ const EXTENSION_OID_KEY_USAGE = "2.5.29.15";
 const EXTENSION_OID_SUBJECT_ALT_NAME = "2.5.29.17";
 const EXTENSION_OID_BASIC_CONSTRAINTS = "2.5.29.19";
 const EXTENSION_OID_AUTHORITY_KEY_ID = "2.5.29.35";
-const EXTENSION_OID_FULCIO_ISSUERV2 = "1.3.6.1.4.1.57264.1.8";
+const EXTENSION_OID_FULCIO_ISSUER_V1 = "1.3.6.1.4.1.57264.1.1";
+const EXTENSION_OID_FULCIO_ISSUER_V2 = "1.3.6.1.4.1.57264.1.8";
 
 export const EXTENSION_OID_SCT = "1.3.6.1.4.1.11129.2.4.2";
 
@@ -152,8 +154,13 @@ export class X509Certificate {
   }
 
   // TODO, improve this, support v1, do not force undefined
+  get extFulcioIssuerV1(): X509FulcioIssuerV1 | undefined {
+    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUER_V1);
+    return ext ? new X509FulcioIssuerV1(ext) : undefined;
+  }
+
   get extFulcioIssuerV2(): X509FulcioIssuerV2 | undefined {
-    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUERV2);
+    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUER_V2);
     return ext ? new X509FulcioIssuerV2(ext) : undefined;
   }
 
