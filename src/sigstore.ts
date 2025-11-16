@@ -9,10 +9,8 @@ import {
   Uint8ArrayToString,
 } from "./encoding.js";
 import {
-  CTLog,
   RawCAs,
   RawLogs,
-  RawTimestampAuthorities,
   Sigstore,
   SigstoreRoots,
   TrustedRoot,
@@ -25,9 +23,6 @@ import {
 } from "./x509/index.js";
 import { verifyMerkleInclusion } from "./tlog/merkle.js";
 import { verifyCheckpoint } from "./tlog/checkpoint.js";
-import { verifyTLogBody } from "./tlog/body.js";
-import { verifyBundleTimestamp } from "./timestamp/tsa.js";
-import { TrustedRootProvider } from "./trust/tuf.js";
 
 export interface SigstoreVerifierOptions {
   tlogThreshold?: number;
@@ -50,7 +45,7 @@ export class SigstoreVerifier {
     };
   }
 
-  async loadLog(frozenTimestamp: Date, logs: RawLogs): Promise<CryptoKey | undefined> {
+  async loadLog(frozenTimestamp: Date, logs: RawLogs): Promise<CryptoKey> {
     // We will stop at the first valid one
     // We do not support more than one valid one at a time, not sure if Sigstore does
     // But it probably do to verify past artifacts: otherwise things still valid today might be discarded
@@ -70,83 +65,7 @@ export class SigstoreVerifier {
       }
     }
 
-    // Return undefined instead of throwing - some bundles don't need Rekor keys
-    // (e.g., v0.3 bundles with inclusion proofs)
-    return undefined;
-  }
-
-  async loadCTLogs(frozenTimestamp: Date, ctlogs: RawLogs): Promise<CTLog[]> {
-    const result: CTLog[] = [];
-
-    for (const log of ctlogs) {
-      const start = new Date(log.publicKey.validFor.start);
-      const end = log.publicKey.validFor.end
-        ? new Date(log.publicKey.validFor.end)
-        : new Date('9999-12-31'); // No expiry means valid forever
-
-      // Include logs that are valid (started before frozen timestamp)
-      // We keep all logs, even expired ones, for historical verification
-      if (start <= frozenTimestamp) {
-        const publicKey = await importKey(
-          log.publicKey.keyDetails,
-          log.publicKey.keyDetails,
-          log.publicKey.rawBytes,
-        );
-
-        result.push({
-          logID: base64ToUint8Array(log.logId.keyId),
-          publicKey,
-          validFor: { start, end },
-        });
-      }
-    }
-
-    if (result.length === 0) {
-      throw new Error("Could not find any valid CT logs in sigstore root.");
-    }
-
-    return result;
-  }
-
-  async loadTSA(
-    frozenTimestamp: Date,
-    tsas?: RawTimestampAuthorities,
-  ): Promise<X509Certificate | undefined> {
-    if (!tsas || tsas.length === 0) {
-      return undefined;
-    }
-
-    for (const tsa of tsas) {
-      // if start date is not in the future, and if an end doesn't exist or is in the future
-      if (
-        frozenTimestamp > new Date(tsa.validFor.start) &&
-        (!tsa.validFor.end || new Date(tsa.validFor.end) > frozenTimestamp)
-      ) {
-        let parentCert: X509Certificate | undefined = undefined;
-        let currentCert: X509Certificate | undefined = undefined;
-        for (const cert of tsa.certChain.certificates.reverse()) {
-          currentCert = X509Certificate.parse(base64ToUint8Array(cert.rawBytes));
-
-          if (parentCert == undefined) {
-            parentCert = currentCert;
-
-            // So we are expecting a root here, so it has to be self signed
-            if (!(await currentCert.verify())) {
-              throw new Error("TSA root cert self signature does not verify.");
-            }
-          } else {
-            if (!(await currentCert.verify(parentCert))) {
-              throw new Error("TSA cert signature does not verify.");
-            }
-            parentCert = currentCert;
-          }
-        }
-
-        if (currentCert) return currentCert;
-      }
-    }
-
-    return undefined;
+    throw new Error("Could not find a valid key in sigstore root.");
   }
 
   async loadCA(frozenTimestamp: Date, cas: RawCAs): Promise<X509Certificate> {
@@ -159,7 +78,7 @@ export class SigstoreVerifier {
         let parentCert: X509Certificate | undefined = undefined;
         let currentCert: X509Certificate | undefined = undefined;
         for (const cert of ca.certChain.certificates.reverse()) {
-          currentCert = X509Certificate.parse(base64ToUint8Array(cert.rawBytes));
+          currentCert = X509Certificate.parse(cert.rawBytes);
 
           if (parentCert == undefined) {
             parentCert = currentCert;
@@ -173,8 +92,11 @@ export class SigstoreVerifier {
               throw new Error("Error verifying the certificate chain.");
             }
           }
-          // Skip validity check for intermediate certificates in the chain
-          // The actual signing certificate will be checked at the time of signing
+          if (!currentCert.validForDate(frozenTimestamp)) {
+            throw new Error(
+              "A certificate in the chain is not valid at the current date.",
+            );
+          }
         }
         if (!currentCert) {
           throw new Error("Could not find a valid certificate.");
@@ -191,32 +113,19 @@ export class SigstoreVerifier {
     this.rawRoot = rawRoot;
     this.root = {
       rekor: await this.loadLog(frozenTimestamp, rawRoot[SigstoreRoots.tlogs]),
-      ctlogs: await this.loadCTLogs(frozenTimestamp, rawRoot[SigstoreRoots.ctlogs]),
+      ctfe: await this.loadLog(frozenTimestamp, rawRoot[SigstoreRoots.ctlogs]),
       fulcio: await this.loadCA(
         frozenTimestamp,
         rawRoot[SigstoreRoots.certificateAuthorities],
       ),
-      tsa: await this.loadTSA(frozenTimestamp, rawRoot.timestampAuthorities),
     };
-  }
-
-  /**
-   * Load Sigstore trusted root via TUF
-   * Uses The Update Framework for secure, verified updates of trusted root metadata
-   *
-   * @param tufProvider Optional TrustedRootProvider instance. If not provided, uses default Sigstore TUF repository
-   */
-  async loadSigstoreRootWithTUF(tufProvider?: TrustedRootProvider): Promise<void> {
-    const provider = tufProvider || new TrustedRootProvider();
-    const trustedRoot = await provider.getTrustedRoot();
-    await this.loadSigstoreRoot(trustedRoot);
   }
 
   // Adapted from https://github.com/sigstore/sigstore-js/blob/main/packages/verify/src/key/sct.ts
   async verifySCT(
     cert: X509Certificate,
     issuer: X509Certificate,
-    ctlogs: CTLog[],
+    ctlog: CryptoKey,
   ): Promise<boolean> {
     let extSCT: X509SCTExtension | undefined;
 
@@ -242,14 +151,14 @@ export class SigstoreVerifier {
       }
     }
 
-    // No SCT extension found to verify - this is OK, return true
+    // No SCT extension found to verify
     if (!extSCT) {
-      return true;
+      throw new Error("No SCT extension was found.");
     }
 
-    // Found an SCT extension but it has no SCTs - this is OK, return true
+    // Found an SCT extension but it has no SCTs
     if (extSCT.signedCertificateTimestamps.length === 0) {
-      return true;
+      throw new Error("No SCT was found in the SCT extension.");
     }
 
     // Construct the PreCert structure
@@ -268,7 +177,6 @@ export class SigstoreVerifier {
     preCert.appendView(tbs);
 
     // Let's iterate over the SCTs, if there are more than one, and see if we can validate at least one
-    let lastError: any = null;
     for (const logId of extSCT.signedCertificateTimestamps.keys()) {
       const sct = extSCT.signedCertificateTimestamps[logId];
 
@@ -276,44 +184,20 @@ export class SigstoreVerifier {
       // TODO: it's debatable if this condition is too strict: the log could lag a bit ans this should
       // still be valid
       if (sct.datetime < cert.notBefore || sct.datetime > cert.notAfter) {
-        lastError = new Error(`SCT timestamp is invalid: SCT datetime ${sct.datetime}, cert notBefore ${cert.notBefore}, cert notAfter ${cert.notAfter}`);
-        continue; // Try next SCT instead of throwing immediately
+        throw new Error("SCT timestamp is invalid.");
       }
 
-      // Find the CT log that matches this SCT's log ID and is valid for the SCT datetime
-      const validCTLogs = ctlogs.filter((log) => {
-        // Check if log IDs match
-        if (log.logID.length !== sct.logID.length) return false;
-        for (let i = 0; i < log.logID.length; i++) {
-          if (log.logID[i] !== sct.logID[i]) return false;
-        }
-        // Check that the SCT datetime is within the log's validity period
-        return log.validFor.start <= sct.datetime && sct.datetime <= log.validFor.end;
-      });
-
-      // Try to verify with any valid CT log
-      for (const log of validCTLogs) {
-        try {
-          if (await sct.verify(preCert.buffer, log.publicKey)) {
-            return true;
-          }
-        } catch (e) {
-          lastError = e;
-          console.error(`SCT verify error for log ${Uint8ArrayToHex(sct.logID)}:`, e);
-        }
-      }
-
-      if (validCTLogs.length === 0) {
-        lastError = new Error(`No valid CT log found for SCT with log ID ${Uint8ArrayToHex(sct.logID)}`);
+      if (await sct.verify(preCert.buffer, ctlog)) {
+        return true;
       }
     }
-    throw new Error(`SCT verification failed: ${lastError?.message || 'No valid SCTs found'}`);
+    throw new Error("SCT verification failed.");
   }
 
   async verifyInclusionPromise(
     cert: X509Certificate,
     bundle: SigstoreBundle,
-    rekor: CryptoKey | undefined,
+    rekor: CryptoKey,
   ): Promise<boolean> {
     // We support and expect only one entry
     if (bundle.verificationMaterial.tlogEntries.length < 1) {
@@ -323,19 +207,6 @@ export class SigstoreVerifier {
     }
 
     const entry = bundle.verificationMaterial.tlogEntries[0];
-
-    // Extract bundle version from mediaType
-    // e.g., "application/vnd.dev.sigstore.bundle+json;version=0.2"
-    const versionMatch = bundle.mediaType.match(/version=(\d+\.\d+)/);
-    const bundleVersion = versionMatch ? versionMatch[1] : "0.1";
-    const isV02OrLater = parseFloat(bundleVersion) >= 0.2;
-
-    // Bundle v0.2+ requires an inclusion proof
-    if (isV02OrLater && !entry.inclusionProof) {
-      throw new Error(
-        "Bundle v0.2+ requires an inclusion proof.",
-      );
-    }
 
     // For rekor2/v0.3 bundles with inclusion proofs, the inclusion promise is optional
     if (!entry.inclusionPromise?.signedEntryTimestamp) {
@@ -347,104 +218,52 @@ export class SigstoreVerifier {
       }
     } else {
       // Verify the inclusion promise signature if present
-      // For v0.3 bundles that have both inclusion promise and proof,
-      // we can skip the promise verification if we don't have a Rekor key
-      // and there's a valid inclusion proof
-      if (!rekor && entry.inclusionProof) {
-        // Skip promise verification if we have an inclusion proof
-        // The inclusion proof will be verified later
-      } else {
-        if (!rekor) {
-          throw new Error("Rekor public key not found in trusted root");
-        }
+      const signature = base64ToUint8Array(
+        entry.inclusionPromise.signedEntryTimestamp,
+      );
 
-        const signature = base64ToUint8Array(
-          entry.inclusionPromise.signedEntryTimestamp,
-        );
-
-        const keyId = Uint8ArrayToHex(base64ToUint8Array(entry.logId.keyId));
-        const integratedTime = Number(entry.integratedTime);
-
-        const signed = stringToUint8Array(
-          canonicalize({
-            body: entry.canonicalizedBody,
-            integratedTime: integratedTime,
-            logIndex: Number(entry.logIndex),
-            logID: keyId,
-          }),
-        );
-
-        if (!(await verifySignature(rekor, signed, signature))) {
-          throw new Error(
-            "Failed to verify the inclusion promise in the provided bundle.",
-          );
-        }
-      }
-    }
-
-    // Validate integrated time and logged certificate
-    // Note: Rekor v2 bundles don't have integrated time in the tlog entry
-    if (entry.integratedTime) {
+      const keyId = Uint8ArrayToHex(base64ToUint8Array(entry.logId.keyId));
       const integratedTime = Number(entry.integratedTime);
-      const integratedDate = new Date(integratedTime * 1000);
 
-      if (!cert.validForDate(integratedDate)) {
+      const signed = stringToUint8Array(
+        canonicalize({
+          body: entry.canonicalizedBody,
+          integratedTime: integratedTime,
+          logIndex: Number(entry.logIndex),
+          logID: keyId,
+        }),
+      );
+
+      if (!(await verifySignature(rekor, signed, signature))) {
         throw new Error(
-          "Artifact signing was logged outside of the certificate validity.",
-        );
-      }
-    } else {
-      // Rekor v2 bundles (no integratedTime) require a timestamp for verification
-      if (!bundle.verificationMaterial.timestampVerificationData) {
-        throw new Error(
-          "Rekor v2 bundles require a timestamp for verification.",
+          "Failed to verify the inclusion promise in the provided bundle.",
         );
       }
     }
 
-    // Verify that the certificate in the log matches the signing certificate
-    // The format depends on the entry type (hashedrekord vs dsse) and version
-    const bodyJson = JSON.parse(Uint8ArrayToString(base64ToUint8Array(entry.canonicalizedBody)));
+    // Always validate integrated time and logged certificate
+    const integratedTime = Number(entry.integratedTime);
+    const integratedDate = new Date(integratedTime * 1000);
 
-    if (bodyJson.kind === "hashedrekord") {
-      let loggedCertContent: string | undefined;
+    if (!cert.validForDate(integratedDate)) {
+      throw new Error(
+        "Artifact signing was logged outside of the certificate validity.",
+      );
+    }
 
-      // Check for hashedRekordV002 structure (Rekor v2)
-      if (bodyJson.spec.hashedRekordV002) {
-        const verifier = bodyJson.spec.hashedRekordV002.signature.verifier;
-        if (verifier?.x509Certificate) {
-          loggedCertContent = verifier.x509Certificate.rawBytes;
-        }
-      }
-      // Check for older hashedrekord structure
-      else if (bodyJson.spec.signature?.publicKey) {
-        loggedCertContent = bodyJson.spec.signature.publicKey.content;
-      }
-
-      if (loggedCertContent) {
-        // For hashedrekord v0.0.1, publicKey.content is base64-encoded PEM
-        // For hashedRekordV002, x509Certificate.rawBytes is base64-encoded DER
-        let loggedCert: X509Certificate;
-        if (bodyJson.spec.hashedRekordV002) {
-          loggedCert = X509Certificate.parse(base64ToUint8Array(loggedCertContent));
-        } else {
-          const pemString = Uint8ArrayToString(base64ToUint8Array(loggedCertContent));
-          loggedCert = X509Certificate.parse(pemString);
-        }
-
-        if (!cert.equals(loggedCert)) {
-          throw new Error(
-            "Certificate in Rekor log does not match the signing certificate.",
-          );
-        }
-      }
-    } else if (bodyJson.kind === "dsse") {
-      // DSSE entries store signatures differently
-      // The certificate is verified through the bundle's verification material
-      // No additional check needed here
-    } else {
-      // For other entry types, skip certificate matching for now
-      // This may need to be extended for other entry types in the future
+    // TODO: Sigh...
+    const loggedCert = X509Certificate.parse(
+      Uint8ArrayToString(
+        base64ToUint8Array(
+          JSON.parse(Uint8ArrayToString(base64ToUint8Array(entry.canonicalizedBody)))
+            .spec.signature.publicKey.content,
+        ),
+      ),
+    );
+    if (!cert.equals(loggedCert)) {
+      throw new Error(
+        "Certificate in Rekor log does not match the signing certificate.",
+      );
     }
 
     return true;
@@ -477,7 +296,6 @@ export class SigstoreVerifier {
     issuer: string,
     bundle: SigstoreBundle,
     data: Uint8Array,
-    isDigestOnly: boolean = false,
   ): Promise<boolean> {
     // Quick checks first: does the signing certificate have the correct identity?
 
@@ -492,21 +310,7 @@ export class SigstoreVerifier {
       throw new Error("No certificate found in bundle");
     }
 
-    if (process.env.DEBUG_SIGSTORE) {
-      console.error(`Parsing certificate, rawBytes length: ${cert.rawBytes.length}, type: ${typeof cert.rawBytes}`);
-    }
-    let signingCert: X509Certificate;
-    try {
-      signingCert = X509Certificate.parse(base64ToUint8Array(cert.rawBytes));
-      if (process.env.DEBUG_SIGSTORE) {
-        console.error(`Certificate parsed successfully`);
-      }
-    } catch (e) {
-      if (process.env.DEBUG_SIGSTORE) {
-        console.error(`Failed to parse certificate: ${e}`);
-      }
-      throw e;
-    }
+    const signingCert = X509Certificate.parse(cert.rawBytes);
 
     if (!bundle.messageSignature) {
       throw new Error("No message signature found in bundle");
@@ -521,9 +325,7 @@ export class SigstoreVerifier {
       );
     }
 
-    // Check for issuer - try V2 first, fall back to V1 (like sigstore-js does)
-    const certIssuer = signingCert.extFulcioIssuerV2?.issuer || signingCert.extFulcioIssuerV1?.issuer;
-    if (certIssuer !== issuer) {
+    if (signingCert.extFulcioIssuerV2?.issuer !== issuer) {
       throw new Error("Identity issuer is not the verifying one.");
     }
 
@@ -547,7 +349,7 @@ export class SigstoreVerifier {
     // # 3 To verify the SCT we need to build a preCert (because the cert was logged without the SCT)
     // https://github.com/sigstore/sigstore-js/packages/verify/src/key/sct.ts#L45
     if (
-      !(await this.verifySCT(signingCert, this.root.fulcio, this.root.ctlogs))
+      !(await this.verifySCT(signingCert, this.root.fulcio, this.root.ctfe))
     ) {
       throw new Error("SCT validation failed.");
     }
@@ -562,45 +364,15 @@ export class SigstoreVerifier {
     // # 5 Rekor inclusion proof (Merkle tree verification)
     await this.verifyInclusionProof(bundle);
 
-    // # 5.1 Rekor body verification
-    if (bundle.verificationMaterial.tlogEntries.length > 0) {
-      await verifyTLogBody(
-        bundle.verificationMaterial.tlogEntries[0],
-        bundle
-      );
-    }
-
-    // # 6 TSA Timestamp Verification (if present)
-    let verifiedTimestamp: Date | undefined;
-    if (bundle.verificationMaterial.timestampVerificationData) {
-      // Verify TSA timestamps if present
-      verifiedTimestamp = await verifyBundleTimestamp(
-        bundle.verificationMaterial.timestampVerificationData,
-        signature,
-        this.rawRoot?.timestampAuthorities || []
-      );
-
-      // If we have a verified timestamp, check certificate validity at that time
-      if (verifiedTimestamp && !signingCert.validForDate(verifiedTimestamp)) {
-        throw new Error(
-          "Certificate was not valid at the time of timestamping"
-        );
-      }
-    }
+    // # 6 TSA *skipping*, not supported by sigstore community
 
     // # 7 Revocation *skipping* not really a thing (unsurprisingly)
 
     // # 8 verify the signed data
-    // When only a digest is provided (for hashedrekord entries), we cannot verify the signature
-    // because the signature is over the original artifact data, not the digest.
-    // In this case, we skip signature verification - the digest match is sufficient.
-    if (!isDigestOnly) {
-      const publicKey = await signingCert.publicKeyObj;
-      const verified = await verifySignature(publicKey, data, signature);
-      if (!verified) {
-        const keyAlg = publicKey.algorithm.name || 'unknown';
-        throw new Error(`Error verifying artifact signature. Key algorithm: ${keyAlg}, Data length: ${data.length}, Signature length: ${signature.length}, isDigestOnly: ${isDigestOnly}`);
-      }
+    if (
+      !(await verifySignature(await signingCert.publicKeyObj, data, signature))
+    ) {
+      throw new Error("Error verifying artifact signature.");
     }
 
     return true;
