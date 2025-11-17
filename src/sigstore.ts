@@ -639,15 +639,7 @@ export class SigstoreVerifier {
       }
 
       // Create PAE (Pre-Authentication Encoding) for signature verification
-      // PAE = "DSSEv1" + SP + LEN(type) + SP + type + SP + LEN(payload) + SP + payload (raw bytes)
-      const payloadType = bundle.dsseEnvelope.payloadType;
-      const prefix = `DSSEv1 ${payloadType.length} ${payloadType} ${payloadBytes.length} `;
-      const prefixBytes = stringToUint8Array(prefix);
-
-      // Concatenate prefix and payload bytes
-      const pae = new Uint8Array(prefixBytes.length + payloadBytes.length);
-      pae.set(prefixBytes, 0);
-      pae.set(payloadBytes, prefixBytes.length);
+      const pae = preAuthEncoding(bundle.dsseEnvelope.payloadType, payloadBytes);
 
       const publicKey = await signingCert.publicKeyObj;
       const verified = await verifySignature(publicKey, pae, signature);
