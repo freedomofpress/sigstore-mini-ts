@@ -11,6 +11,7 @@ import {
   Uint8ArrayToString,
 } from "./encoding.js";
 import {
+  CertAuthority,
   CTLog,
   RawCAs,
   RawLogs,
@@ -22,6 +23,7 @@ import {
 } from "./interfaces.js";
 import { ByteStream } from "./stream.js";
 import {
+  CertificateChainVerifier,
   EXTENSION_OID_SCT,
   X509Certificate,
   X509SCTExtension,
@@ -114,83 +116,101 @@ export class SigstoreVerifier {
     return result;
   }
 
-  async loadTSA(
-    frozenTimestamp: Date,
-    tsas?: RawTimestampAuthorities,
-  ): Promise<X509Certificate | undefined> {
-    if (!tsas || tsas.length === 0) {
-      return undefined;
-    }
+  // Adapted from https://github.com/sigstore/sigstore-js/blob/main/packages/verify/src/key/certificate.ts#L22-L53
+  // Verifies that the leaf certificate chains to a trusted CA and is valid at the given timestamp.
+  // Differences from sigstore-js:
+  // - This is async (uses await) because our CertificateChainVerifier.verify() is async
+  // - sigstore-js filters CAs using filterCertAuthorities() before calling this function,
+  //   we do the timestamp filtering inline within this function
+  async verifyCertificateChain(
+    timestamp: Date,
+    leaf: X509Certificate,
+    certificateAuthorities: CertAuthority[]
+  ): Promise<X509Certificate[]> {
+    let lastError: any;
 
-    for (const tsa of tsas) {
-      // if start date is not in the future, and if an end doesn't exist or is in the future
-      if (
-        frozenTimestamp > new Date(tsa.validFor.start) &&
-        (!tsa.validFor.end || new Date(tsa.validFor.end) > frozenTimestamp)
-      ) {
-        let parentCert: X509Certificate | undefined = undefined;
-        let currentCert: X509Certificate | undefined = undefined;
-        // Use slice() to avoid mutating the original array
-        for (const cert of tsa.certChain.certificates.slice().reverse()) {
-          currentCert = X509Certificate.parse(base64ToUint8Array(cert.rawBytes));
+    for (const ca of certificateAuthorities) {
+      // Check if this CA is valid for the given timestamp
+      if (timestamp < ca.validFor.start || timestamp > ca.validFor.end) {
+        continue;
+      }
 
-          if (parentCert == undefined) {
-            parentCert = currentCert;
-
-            // So we are expecting a root here, so it has to be self signed
-            if (!(await currentCert.verify())) {
-              throw new Error("TSA root cert self signature does not verify.");
-            }
-          } else {
-            if (!(await currentCert.verify(parentCert))) {
-              throw new Error("TSA cert signature does not verify.");
-            }
-            parentCert = currentCert;
-          }
-        }
-
-        if (currentCert) return currentCert;
+      try {
+        const verifier = new CertificateChainVerifier({
+          trustedCerts: ca.certChain,
+          untrustedCert: leaf,
+          timestamp,
+        });
+        return await verifier.verify();
+      } catch (err) {
+        lastError = err;
       }
     }
 
-    return undefined;
+    throw new Error(`Failed to verify certificate chain: ${lastError?.message || 'No valid CAs found'}`);
   }
 
-  async loadCA(frozenTimestamp: Date, cas: RawCAs): Promise<X509Certificate> {
-    for (const ca of cas) {
-      // if start date is not in the future, and if an end doesn't exist or is in the future
-      if (
-        frozenTimestamp > new Date(ca.validFor.start) &&
-        (!ca.validFor.end || new Date(ca.validFor.end) > frozenTimestamp)
-      ) {
-        let parentCert: X509Certificate | undefined = undefined;
-        let currentCert: X509Certificate | undefined = undefined;
-        // Use slice() to avoid mutating the original array
-        for (const cert of ca.certChain.certificates.slice().reverse()) {
-          currentCert = X509Certificate.parse(base64ToUint8Array(cert.rawBytes));
+  // Load timestamp authorities that are valid at the frozen timestamp.
+  // Unlike sigstore-js which doesn't pre-load TSAs (it passes raw TSA data to timestamp verification),
+  // we parse and filter them at initialization time for consistency with how we handle CAs and other roots.
+  loadTSA(
+    frozenTimestamp: Date,
+    tsas?: RawTimestampAuthorities,
+  ): CertAuthority[] {
+    if (!tsas || tsas.length === 0) {
+      return [];
+    }
 
-          if (parentCert == undefined) {
-            parentCert = currentCert;
+    const result: CertAuthority[] = [];
 
-            // So we are expecting a root here, so it has to be self sigend
-            if (!(await currentCert.verify())) {
-              throw new Error("Root cert self signature does not verify.");
-            }
-          } else {
-            if (!(await currentCert.verify(parentCert))) {
-              throw new Error("Error verifying the certificate chain.");
-            }
-          }
-          // Skip validity check for intermediate certificates in the chain
-          // The actual signing certificate will be checked at the time of signing
+    for (const tsa of tsas) {
+      const start = new Date(tsa.validFor.start);
+      const end = tsa.validFor.end ? new Date(tsa.validFor.end) : new Date(8640000000000000);
+
+      if (frozenTimestamp > start && frozenTimestamp < end) {
+        const certChain = tsa.certChain.certificates.map(cert =>
+          X509Certificate.parse(base64ToUint8Array(cert.rawBytes))
+        );
+
+        if (certChain.length > 0) {
+          result.push({
+            certChain,
+            validFor: { start, end },
+          });
         }
-        if (!currentCert) {
-          throw new Error("Could not find a valid certificate.");
-        }
-        return currentCert;
       }
     }
-    throw new Error("Could not find a valid CA in sigstore root.");
+
+    return result;
+  }
+
+  // Load certificate authorities (Fulcio CAs) that are valid at the frozen timestamp.
+  // Similar to sigstore-js's filterCertAuthorities() in trust/filter.ts, but we also
+  // parse the certificates at load time whereas sigstore-js keeps them in the trust material
+  // and parses them during verification. This pre-loading approach is consistent with our
+  // architecture of loading all trusted roots at initialization.
+  loadCA(frozenTimestamp: Date, cas: RawCAs): CertAuthority[] {
+    const result: CertAuthority[] = [];
+
+    for (const ca of cas) {
+      const start = new Date(ca.validFor.start);
+      const end = ca.validFor.end ? new Date(ca.validFor.end) : new Date(8640000000000000);
+
+      if (frozenTimestamp > start && frozenTimestamp < end) {
+        const certChain = ca.certChain.certificates.map(cert =>
+          X509Certificate.parse(base64ToUint8Array(cert.rawBytes))
+        );
+
+        if (certChain.length > 0) {
+          result.push({
+            certChain,
+            validFor: { start, end },
+          });
+        }
+      }
+    }
+
+    return result;
   }
 
   async loadSigstoreRoot(rawRoot: TrustedRoot) {
@@ -200,11 +220,11 @@ export class SigstoreVerifier {
     this.root = {
       rekor: await this.loadLog(frozenTimestamp, rawRoot[SigstoreRoots.tlogs]),
       ctlogs: await this.loadCTLogs(frozenTimestamp, rawRoot[SigstoreRoots.ctlogs]),
-      fulcio: await this.loadCA(
+      certificateAuthorities: this.loadCA(
         frozenTimestamp,
         rawRoot[SigstoreRoots.certificateAuthorities],
       ),
-      tsa: await this.loadTSA(frozenTimestamp, rawRoot.timestampAuthorities),
+      timestampAuthorities: this.loadTSA(frozenTimestamp, rawRoot.timestampAuthorities),
     };
   }
 
@@ -576,26 +596,21 @@ export class SigstoreVerifier {
       throw new Error("Identity issuer is not the verifying one.");
     }
 
-    // # 2 Certificate validity
-    if (!signingCert.verify(this.root.fulcio)) {
-      throw new Error(
-        "Signing certificate has not been signed by the current Fulcio CA.",
-      );
-    }
-    // This check is not complete, we should check every ca in the chain. This is silly we know they are long lived
-    // and we need performance
-    if (
-      signingCert.notBefore < this.root.fulcio.notBefore ||
-      signingCert.notBefore > this.root.fulcio.notAfter
-    ) {
-      throw new Error(
-        "Signing cert was signed when the Fulcio CA was not valid.",
-      );
-    }
+    // # 2 Certificate validity - verify chain to trusted CA
+    // Similar to sigstore-js key/index.ts:59-64 which calls verifyCertificateChain()
+    // Returns the verified certificate path [leaf, intermediate(s), root]
+    const certPath = await this.verifyCertificateChain(
+      signingCert.notBefore,
+      signingCert,
+      this.root.certificateAuthorities
+    );
 
     // # 3 To verify the SCT we need to build a preCert (because the cert was logged without the SCT)
     // https://github.com/sigstore/sigstore-js/packages/verify/src/key/sct.ts#L45
-    const verifiedSCTs = await this.verifySCT(signingCert, this.root.fulcio, this.root.ctlogs);
+    // Similar to sigstore-js key/index.ts:67 which uses path[0] (leaf) and path[1] (issuer)
+    // for SCT verification. Handle edge case where path has only one cert (self-signed root).
+    const issuerCert = certPath.length > 1 ? certPath[1] : certPath[0];
+    const verifiedSCTs = await this.verifySCT(signingCert, issuerCert, this.root.ctlogs);
     if (verifiedSCTs.length < this.options.ctlogThreshold) {
       throw new Error(
         `Not enough valid SCTs: found ${verifiedSCTs.length}, required ${this.options.ctlogThreshold}`

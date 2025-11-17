@@ -47,14 +47,19 @@ export interface RekorKeyInfo {
   logId: Uint8Array;
 }
 
+export interface CertAuthority {
+  certChain: X509Certificate[];
+  validFor: {
+    start: Date;
+    end: Date;
+  };
+}
+
 export interface Sigstore {
   rekor: RekorKeyInfo | undefined;
   ctlogs: CTLog[];
-  fulcio: X509Certificate;
-  // This is theoretically supported, but not implemented in the community sigstore
-  // See https://github.com/sigstore/root-signing/issues/1389
-  // And https://blog.sigstore.dev/trusted-time/
-  tsa?: X509Certificate;
+  certificateAuthorities: CertAuthority[];
+  timestampAuthorities: CertAuthority[];
 }
 
 export interface RawLog {
