@@ -29,14 +29,15 @@ export function preAuthEncoding(
   ].join(" ");
 
   // DSSE spec requires ASCII encoding for the prefix
-  // Convert string to ASCII bytes (each char must be < 128)
-  const prefixBuffer = new Uint8Array(prefix.length);
-  for (let i = 0; i < prefix.length; i++) {
-    const charCode = prefix.charCodeAt(i);
-    if (charCode > 127) {
-      throw new Error(`Invalid character in PAE prefix at position ${i}: charCode ${charCode}`);
+  // TextEncoder will throw if the string contains non-ASCII characters
+  const encoder = new TextEncoder();
+  const prefixBuffer = encoder.encode(prefix);
+
+  // Verify all characters are ASCII (< 128)
+  for (let i = 0; i < prefixBuffer.length; i++) {
+    if (prefixBuffer[i] > 127) {
+      throw new Error(`Invalid non-ASCII character in PAE prefix at position ${i}`);
     }
-    prefixBuffer[i] = charCode;
   }
 
   // Concatenate prefix and payload
