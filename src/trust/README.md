@@ -25,3 +25,14 @@ This directory contains trust material for Sigstore verification.
 4. **Verification**: Sigstore verifier uses the trust material to verify signatures
 
 This matches the sigstore-js architecture: TUF provides always up-to-date trust material rather than using static embedded files that can become outdated.
+
+## Why No Static `trusted_root.json`?
+
+Unlike some implementations, we do **not** embed a static `trusted_root.json` file. Here's why:
+
+- **Outdated Material**: Static trust roots become outdated (e.g., expired certificates, new CAs, rotated keys)
+- **Reviewer Issues**: Previous embedded files had incorrect `validFor` dates and mismatched certificate subjects
+- **TUF Purpose**: TUF exists specifically to deliver fresh, verified trust material - using it is the correct approach
+- **Matches Reference**: sigstore-js uses TUF exclusively, with no static fallback
+
+The CLI always uses TUF to fetch `trusted_root.json`, ensuring correctness and freshness.
