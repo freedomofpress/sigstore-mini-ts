@@ -104,17 +104,23 @@ export class X509Certificate {
     if (algorithmOID === "1.2.840.113549.1.1.1") {
       // RSA key - use provided hash or default to SHA-256
       const hash = hashAlg || "sha256";
-      const scheme = hash.includes("256") ? "SHA256" :
-                     hash.includes("384") ? "SHA384" :
-                     hash.includes("512") ? "SHA512" : "SHA256";
+      let scheme: string;
+      if (hash.includes("384")) {
+        scheme = "SHA384";
+      } else if (hash.includes("512")) {
+        scheme = "SHA512";
+      } else {
+        scheme = "SHA256";
+      }
       return importKey("RSA", `RSA_PKCS1V5_${scheme}`, Uint8ArrayToBase64(publicKey));
     } else {
       // ECDSA key - the curve OID is in the second element
       const curveOID = spki.subs[0].subs[1]?.toOID();
       const curve = ECDSA_CURVE_NAMES[curveOID];
-      // If no curve found in ECDSA_CURVE_NAMES, fall back to P-384
-      // This might be a P-384 cert where the curve is specified differently
-      return importKey(KeyTypes.Ecdsa, curve || "P-384", Uint8ArrayToBase64(publicKey));
+      if (!curve) {
+        throw new Error(`Unknown ECDSA curve OID: ${curveOID}`);
+      }
+      return importKey(KeyTypes.Ecdsa, curve, Uint8ArrayToBase64(publicKey));
     }
   }
 
