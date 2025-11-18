@@ -9,6 +9,7 @@ Key differences:
 - Custom uint8ArrayEqual instead of crypto.bufferEqual
 */
 import { base64ToUint8Array, toArrayBuffer, uint8ArrayEqual } from "../encoding.js";
+import { HashAlgorithms } from "../interfaces.js";
 import type { TLogEntry } from "../bundle.js";
 
 const RFC6962_LEAF_HASH_PREFIX = new Uint8Array([0x00]);
@@ -137,7 +138,7 @@ async function hashChildren(
   data.set(left, RFC6962_NODE_HASH_PREFIX.length);
   data.set(right, RFC6962_NODE_HASH_PREFIX.length + left.length);
 
-  const hash = await crypto.subtle.digest("SHA-256", toArrayBuffer(data));
+  const hash = await crypto.subtle.digest(HashAlgorithms.SHA256, toArrayBuffer(data));
   return new Uint8Array(hash);
 }
 
@@ -146,6 +147,6 @@ async function hashLeaf(leaf: Uint8Array): Promise<Uint8Array> {
   data.set(RFC6962_LEAF_HASH_PREFIX, 0);
   data.set(leaf, RFC6962_LEAF_HASH_PREFIX.length);
 
-  const hash = await crypto.subtle.digest("SHA-256", toArrayBuffer(data));
+  const hash = await crypto.subtle.digest(HashAlgorithms.SHA256, toArrayBuffer(data));
   return new Uint8Array(hash);
 }

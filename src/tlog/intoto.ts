@@ -11,6 +11,7 @@
  */
 
 import { base64Decode, base64ToUint8Array, hexToUint8Array, toArrayBuffer, uint8ArrayEqual } from "../encoding.js";
+import { HashAlgorithms } from "../interfaces.js";
 import type { SigstoreBundle } from "../bundle.js";
 import type { RekorEntry } from "./body.js";
 
@@ -91,7 +92,7 @@ export async function verifyIntotoBody(
 
     const payloadBytes = base64ToUint8Array(bundle.dsseEnvelope.payload);
     const bundleHashBytes = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", toArrayBuffer(payloadBytes))
+      await crypto.subtle.digest(HashAlgorithms.SHA256, toArrayBuffer(payloadBytes))
     );
 
     if (!uint8ArrayEqual(tlogHashBytes, bundleHashBytes)) {

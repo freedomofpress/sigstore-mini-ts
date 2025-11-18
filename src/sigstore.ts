@@ -13,6 +13,7 @@ import {
 import {
   CertAuthority,
   CTLog,
+  HashAlgorithms,
   RawCAs,
   RawLogs,
   RawTimestampAuthorities,
@@ -301,7 +302,7 @@ export class SigstoreVerifier {
 
     // Calculate hash of the issuer's public key
     const issuerId = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", toArrayBuffer(issuer.publicKey)),
+      await crypto.subtle.digest(HashAlgorithms.SHA256, toArrayBuffer(issuer.publicKey)),
     );
     preCert.appendView(issuerId);
 
@@ -674,7 +675,7 @@ export class SigstoreVerifier {
       } else {
         // data is the file content, compute the digest
         artifactDigest = Uint8ArrayToHex(
-          new Uint8Array(await crypto.subtle.digest("SHA-256", toArrayBuffer(data)))
+          new Uint8Array(await crypto.subtle.digest(HashAlgorithms.SHA256, toArrayBuffer(data)))
         );
       }
 
@@ -706,10 +707,8 @@ export class SigstoreVerifier {
       const publicKey = await signingCert.publicKeyObj;
 
       if (isDigestOnly) {
-        // For hashedrekord bundles where only a digest is provided,
-        // the signature is over the digest bytes (not the original artifact).
-        // WebCrypto's verify() would hash the digest again, so we use elliptic
-        // for low-level ECDSA verification over the pre-computed digest.
+        // For hashedrekord bundles, verify signature over the digest directly.
+        // Uses the same elliptic.js workaround as sigstore-js conformance CLI.
         const verified = await verifySignatureOverDigest(publicKey, data, signature);
         if (!verified) {
           throw new Error("Error verifying signature over digest");

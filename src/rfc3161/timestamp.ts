@@ -16,6 +16,7 @@ limitations under the License.
 import { ASN1Obj } from "../asn1/index.js";
 import { bufferEqual, verifySignature } from "../crypto.js";
 import { toArrayBuffer } from "../encoding.js";
+import { HashAlgorithms } from "../interfaces.js";
 import { ECDSA_SIGNATURE_ALGOS, RSA_SIGNATURE_ALGOS, SHA2_HASH_ALGOS } from "../oid.js";
 import { RFC3161TimestampVerificationError } from "./error.js";
 import { TSTInfo } from "./tstinfo.js";
@@ -116,9 +117,9 @@ export class RFC3161Timestamp {
     const hashAlg = this.signerDigestAlgorithm;
 
     // Convert hash algorithm name to the format expected by WebCrypto
-    const hashAlgName = hashAlg === "sha256" ? "SHA-256" :
-                       hashAlg === "sha384" ? "SHA-384" :
-                       hashAlg === "sha512" ? "SHA-512" : hashAlg;
+    const hashAlgName = hashAlg === "sha256" ? HashAlgorithms.SHA256 :
+                       hashAlg === "sha384" ? HashAlgorithms.SHA384 :
+                       hashAlg === "sha512" ? HashAlgorithms.SHA512 : hashAlg;
 
     const tstInfoDigest = await crypto.subtle.digest(
       hashAlgName,

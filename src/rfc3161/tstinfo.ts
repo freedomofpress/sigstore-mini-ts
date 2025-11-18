@@ -16,6 +16,7 @@ limitations under the License.
 import { ASN1Obj } from "../asn1/index.js";
 import { bufferEqual } from "../crypto.js";
 import { toArrayBuffer } from "../encoding.js";
+import { HashAlgorithms } from "../interfaces.js";
 import { SHA2_HASH_ALGOS } from "../oid.js";
 import { RFC3161TimestampVerificationError } from "./error.js";
 
@@ -55,9 +56,9 @@ export class TSTInfo {
     const hashAlg = this.messageImprintHashAlgorithm;
 
     // Convert hash algorithm name to the format expected by WebCrypto
-    const hashAlgName = hashAlg === "sha256" ? "SHA-256" :
-                       hashAlg === "sha384" ? "SHA-384" :
-                       hashAlg === "sha512" ? "SHA-512" : hashAlg;
+    const hashAlgName = hashAlg === "sha256" ? HashAlgorithms.SHA256 :
+                       hashAlg === "sha384" ? HashAlgorithms.SHA384 :
+                       hashAlg === "sha512" ? HashAlgorithms.SHA512 : hashAlg;
 
     const digest = await crypto.subtle.digest(
       hashAlgName,
