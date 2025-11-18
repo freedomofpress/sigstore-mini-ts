@@ -1,6 +1,7 @@
 import { ASN1Obj } from "./asn1/index.js";
 import {
   base64ToUint8Array,
+  base64UrlToUint8Array,
   hexToUint8Array,
   toArrayBuffer,
   Uint8ArrayToHex,
@@ -41,6 +42,12 @@ function pkcs1ToSpki(pkcs1Bytes: Uint8Array): Uint8Array {
   return result;
 }
 
+// Encodes a length value in DER (Distinguished Encoding Rules) format.
+// DER length encoding rules:
+// - Lengths 0-127: single byte containing the length
+// - Lengths 128-255: 0x81 followed by one byte containing the length
+// - Lengths 256-65535: 0x82 followed by two bytes containing the length (big-endian)
+// Used by pkcs1ToSpki() to construct valid ASN.1/DER structures.
 function lengthBytes(length: number): Uint8Array {
   if (length < 128) {
     return new Uint8Array([length]);
@@ -51,6 +58,27 @@ function lengthBytes(length: number): Uint8Array {
   }
 }
 
+// Imports cryptographic public keys into the Web Crypto API format (CryptoKey).
+// This function is specific to the browser implementation and doesn't exist in sigstore-js.
+//
+// Why needed for browser:
+// - sigstore-js uses Node.js crypto.createPublicKey() which handles many key formats automatically
+// - Browsers only have Web Crypto API (crypto.subtle.importKey) which requires explicit format/algorithm
+// - This function bridges the gap by:
+//   1. Detecting key format (PEM, hex, base64, PKCS#1, SPKI)
+//   2. Converting PKCS#1 RSA keys to SPKI (Web Crypto only supports SPKI for RSA)
+//   3. Mapping Sigstore key types/schemes to Web Crypto algorithm parameters
+//
+// Supports:
+// - ECDSA (P-256, P-384, P-521) - Used by Fulcio, CT logs
+// - Ed25519 - Used by Rekor checkpoints, some CT logs
+// - RSA (PKCS#1, PSS) - Used by older CT logs and some Rekor instances
+//
+// Key format detection:
+// - PEM format (contains "BEGIN"): Parse with toDER()
+// - Hex string (all hex chars): Import as raw
+// - Base64 PKCS#1 (starts with 0x30 0x82...): Convert to SPKI
+// - Base64 SPKI: Import directly
 export async function importKey(
   keytype: string,
   scheme: string,
@@ -97,15 +125,15 @@ export async function importKey(
   } else if (keytype.toLowerCase().includes("ed25519")) {
     params.algorithm = { name: "Ed25519" };
   } else if (keytype.toLowerCase().includes("rsa") || keytype.toLowerCase().includes("pkcs1")) {
-    let hashName = "SHA-256";
+    let hashName = HashAlgorithms.SHA256;
     // Normalize scheme to handle various formats: SHA256, SHA_256, SHA-256, etc.
     const normalizedScheme = scheme.toUpperCase().replace(/[-_]/g, "");
     if (normalizedScheme.includes("SHA256") || normalizedScheme.includes("256")) {
-      hashName = "SHA-256";
+      hashName = HashAlgorithms.SHA256;
     } else if (normalizedScheme.includes("SHA384") || normalizedScheme.includes("384")) {
-      hashName = "SHA-384";
+      hashName = HashAlgorithms.SHA384;
     } else if (normalizedScheme.includes("SHA512") || normalizedScheme.includes("512")) {
-      hashName = "SHA-512";
+      hashName = HashAlgorithms.SHA512;
     }
 
     if (scheme.includes("PKCS1") || scheme.includes("RSA_PKCS1")) {
@@ -203,9 +231,9 @@ export async function verifySignature(
   } else if (key.algorithm.name === "RSA-PSS") {
     // Salt length must match the hash output size
     const hashAlg = (key.algorithm as RsaHashedKeyAlgorithm).hash.name;
-    const saltLength = hashAlg === "SHA-256" ? 32 :
-                       hashAlg === "SHA-384" ? 48 :
-                       hashAlg === "SHA-512" ? 64 : 32;
+    const saltLength = hashAlg === HashAlgorithms.SHA256 ? 32 :
+                       hashAlg === HashAlgorithms.SHA384 ? 48 :
+                       hashAlg === HashAlgorithms.SHA512 ? 64 : 32;
     return await crypto.subtle.verify(
       {
         name: "RSA-PSS",
@@ -227,6 +255,11 @@ export async function verifySignature(
   }
 }
 
+// Verifies an ECDSA signature over a pre-computed digest.
+// WebCrypto's verify() always hashes the input first, so passing a digest would
+// result in double-hashing. We use elliptic.js for low-level ECDSA verification,
+// adapted from the same workaround used in sigstore-js's conformance CLI.
+// See: https://github.com/sigstore/sigstore-js/blob/main/packages/conformance/src/commands/verify-bundle.ts#L111
 export async function verifySignatureOverDigest(
   key: CryptoKey,
   digest: Uint8Array,
@@ -273,8 +306,8 @@ export async function verifySignatureOverDigest(
   }
 
   // Convert base64url JWK coordinates to hex
-  const x = Buffer.from(jwk.x, "base64").toString("hex");
-  const y = Buffer.from(jwk.y, "base64").toString("hex");
+  const x = Uint8ArrayToHex(base64UrlToUint8Array(jwk.x));
+  const y = Uint8ArrayToHex(base64UrlToUint8Array(jwk.y));
 
   // Create elliptic key from public key coordinates
   const eckey = ec.keyFromPublic({ x, y }, "hex");
