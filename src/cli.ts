@@ -4,9 +4,10 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { SigstoreBundle } from "./bundle.js";
-import { base64ToUint8Array, Uint8ArrayToHex } from "./encoding.js";
+import { base64ToUint8Array, hexToUint8Array, Uint8ArrayToHex, Uint8ArrayToString } from "./encoding.js";
 import { TrustedRoot } from "./interfaces.js";
 import { SigstoreVerifier } from "./sigstore.js";
+import { TrustedRootProvider } from "./trust/tuf.js";
 
 // Ensure the global Web Crypto implementation is available when running under Node.js
 if (typeof globalThis.crypto === "undefined") {
@@ -17,7 +18,7 @@ interface CLIOptions {
   bundlePath: string;
   certificateIdentity: string;
   certificateOidcIssuer: string;
-  trustedRootPath: string;
+  trustedRootPath: string | undefined;
   artifactInput: string;
 }
 
@@ -25,7 +26,7 @@ type ArtifactInput =
   | { type: "file"; path: string; data: Uint8Array; digestHex: string }
   | { type: "digest"; digestHex: string };
 
-const USAGE = `Usage: sigstore-mini-ts verify-bundle [--staging] --bundle FILE --certificate-identity IDENTITY --certificate-oidc-issuer URL [--trusted-root FILE] FILE_OR_DIGEST`;
+const USAGE = `Usage: sigstore-browser verify-bundle [--staging] --bundle FILE --certificate-identity IDENTITY --certificate-oidc-issuer URL [--trusted-root FILE] FILE_OR_DIGEST`;
 
 function printUsage(): void {
   console.error(USAGE);
@@ -120,10 +121,6 @@ function parseArgs(argv: string[]): CLIOptions {
     throw new Error("Missing required option --certificate-oidc-issuer");
   }
 
-  if (!options.trustedRootPath) {
-    throw new Error("Missing required option --trusted-root");
-  }
-
   return {
     bundlePath: options.bundlePath,
     certificateIdentity: options.certificateIdentity,
@@ -169,7 +166,17 @@ async function resolveArtifact(input: string): Promise<ArtifactInput> {
   };
 }
 
-async function loadTrustedRoot(pathInput: string): Promise<TrustedRoot> {
+async function loadTrustedRoot(
+  pathInput: string | undefined,
+): Promise<TrustedRoot> {
+  if (!pathInput) {
+    // Use TUF to fetch the latest trusted root (matches sigstore-js behavior)
+    const tufProvider = new TrustedRootProvider({
+      metadataUrl: "https://tuf-repo-cdn.sigstore.dev/",
+      targetBaseUrl: "https://tuf-repo-cdn.sigstore.dev/targets/",
+    });
+    return await tufProvider.getTrustedRoot();
+  }
   const resolvedPath = path.resolve(pathInput);
   const raw = await readFile(resolvedPath, "utf8");
   return JSON.parse(raw) as TrustedRoot;
@@ -191,18 +198,57 @@ async function verifyBundle(options: CLIOptions): Promise<void> {
   const verifier = new SigstoreVerifier();
   await verifier.loadSigstoreRoot(trustedRoot);
 
-  if (bundle.messageSignature.messageDigest.algorithm !== "SHA2_256") {
-    throw new Error(
-      `Unsupported message digest algorithm: ${bundle.messageSignature.messageDigest.algorithm}`,
+  // Extract and verify the artifact digest from the bundle
+  let bundleDigestHex: string;
+  let bundleDigestBytes: Uint8Array;
+
+  if (bundle.messageSignature) {
+    // Regular bundle: digest is in messageSignature
+    if (bundle.messageSignature.messageDigest.algorithm !== "SHA2_256") {
+      throw new Error(
+        `Unsupported message digest algorithm: ${bundle.messageSignature.messageDigest.algorithm}`,
+      );
+    }
+
+    bundleDigestBytes = base64ToUint8Array(
+      bundle.messageSignature.messageDigest.digest,
     );
+    bundleDigestHex = Uint8ArrayToHex(bundleDigestBytes).toLowerCase();
+  } else if (bundle.dsseEnvelope) {
+    // DSSE bundle: digest is in the in-toto statement payload
+    const payloadBytes = base64ToUint8Array(bundle.dsseEnvelope.payload);
+    const payload = JSON.parse(Uint8ArrayToString(payloadBytes));
+
+    if (!payload.subject || payload.subject.length === 0) {
+      throw new Error("DSSE payload has no subject");
+    }
+
+    // Find matching subject by comparing artifact digest with all subjects
+    let matchedSubject = null;
+    for (const subject of payload.subject) {
+      const subjectDigest = subject.digest?.["sha256"];
+      if (subjectDigest && artifact.digestHex === subjectDigest.toLowerCase()) {
+        matchedSubject = subject;
+        break;
+      }
+    }
+
+    if (!matchedSubject) {
+      throw new Error(
+        `Artifact digest ${artifact.digestHex} does not match any subject in DSSE payload`
+      );
+    }
+
+    bundleDigestHex = matchedSubject.digest["sha256"].toLowerCase();
+
+    // Convert hex digest to bytes for verification target
+    bundleDigestBytes = hexToUint8Array(bundleDigestHex);
+  } else {
+    throw new Error("Bundle does not contain a message signature or DSSE envelope");
   }
 
-  const bundleDigestBytes = base64ToUint8Array(
-    bundle.messageSignature.messageDigest.digest,
-  );
-  const bundleDigestHex = Uint8ArrayToHex(bundleDigestBytes).toLowerCase();
-
-  if (artifact.digestHex !== bundleDigestHex) {
+  // For non-DSSE bundles, verify the digest matches
+  if (bundle.messageSignature && artifact.digestHex !== bundleDigestHex) {
     throw new Error(
       "Artifact digest does not match the digest embedded in the bundle.",
     );
@@ -210,12 +256,14 @@ async function verifyBundle(options: CLIOptions): Promise<void> {
 
   const verificationTarget =
     artifact.type === "file" ? artifact.data : bundleDigestBytes;
+  const isDigestOnly = artifact.type === "digest";
 
   await verifier.verifyArtifact(
     options.certificateIdentity,
     options.certificateOidcIssuer,
     bundle,
     verificationTarget,
+    isDigestOnly,
   );
 }
 

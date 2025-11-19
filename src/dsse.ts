@@ -28,11 +28,19 @@ export function preAuthEncoding(
     "",
   ].join(" ");
 
-  // Is using utf-8 a problem? I don't think so but adding this warning
+  // DSSE spec requires ASCII encoding for the prefix
+  // TextEncoder will throw if the string contains non-ASCII characters
   const encoder = new TextEncoder();
   const prefixBuffer = encoder.encode(prefix);
 
-  // Badic Uint8Array concat
+  // Verify all characters are ASCII (< 128)
+  for (let i = 0; i < prefixBuffer.length; i++) {
+    if (prefixBuffer[i] > 127) {
+      throw new Error(`Invalid non-ASCII character in PAE prefix at position ${i}`);
+    }
+  }
+
+  // Concatenate prefix and payload
   const combinedArray = new Uint8Array(prefixBuffer.length + payload.length);
 
   combinedArray.set(prefixBuffer, 0);

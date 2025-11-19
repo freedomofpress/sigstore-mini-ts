@@ -1,12 +1,83 @@
 import { ASN1Obj } from "./asn1/index.js";
 import {
   base64ToUint8Array,
+  base64UrlToUint8Array,
   hexToUint8Array,
   toArrayBuffer,
+  Uint8ArrayToHex,
 } from "./encoding.js";
 import { EcdsaTypes, HashAlgorithms, KeyTypes } from "./interfaces.js";
 import { toDER } from "./pem.js";
+import { p256, p384, p521 } from "@noble/curves/nist.js";
 
+function pkcs1ToSpki(pkcs1Bytes: Uint8Array): Uint8Array {
+  const algorithmIdentifier = new Uint8Array([
+    0x30, 0x0d,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    0x05, 0x00
+  ]);
+
+  const bitStringLength = pkcs1Bytes.length + 1;
+  const totalContentLength = algorithmIdentifier.length + 1 + lengthBytes(bitStringLength).length + bitStringLength;
+
+  const result = new Uint8Array(1 + lengthBytes(totalContentLength).length + totalContentLength);
+  let offset = 0;
+
+  result[offset++] = 0x30;
+  const totalLengthBytes = lengthBytes(totalContentLength);
+  result.set(totalLengthBytes, offset);
+  offset += totalLengthBytes.length;
+
+  result.set(algorithmIdentifier, offset);
+  offset += algorithmIdentifier.length;
+
+  result[offset++] = 0x03;
+  const bitStringLengthBytes = lengthBytes(bitStringLength);
+  result.set(bitStringLengthBytes, offset);
+  offset += bitStringLengthBytes.length;
+  result[offset++] = 0x00;
+  result.set(pkcs1Bytes, offset);
+
+  return result;
+}
+
+// Encodes a length value in DER (Distinguished Encoding Rules) format.
+// DER length encoding rules:
+// - Lengths 0-127: single byte containing the length
+// - Lengths 128-255: 0x81 followed by one byte containing the length
+// - Lengths 256-65535: 0x82 followed by two bytes containing the length (big-endian)
+// Used by pkcs1ToSpki() to construct valid ASN.1/DER structures.
+function lengthBytes(length: number): Uint8Array {
+  if (length < 128) {
+    return new Uint8Array([length]);
+  } else if (length < 256) {
+    return new Uint8Array([0x81, length]);
+  } else {
+    return new Uint8Array([0x82, (length >> 8) & 0xff, length & 0xff]);
+  }
+}
+
+// Imports cryptographic public keys into the Web Crypto API format (CryptoKey).
+// This function is specific to the browser implementation and doesn't exist in sigstore-js.
+//
+// Why needed for browser:
+// - sigstore-js uses Node.js crypto.createPublicKey() which handles many key formats automatically
+// - Browsers only have Web Crypto API (crypto.subtle.importKey) which requires explicit format/algorithm
+// - This function bridges the gap by:
+//   1. Detecting key format (PEM, hex, base64, PKCS#1, SPKI)
+//   2. Converting PKCS#1 RSA keys to SPKI (Web Crypto only supports SPKI for RSA)
+//   3. Mapping Sigstore key types/schemes to Web Crypto algorithm parameters
+//
+// Supports:
+// - ECDSA (P-256, P-384, P-521) - Used by Fulcio, CT logs
+// - Ed25519 - Used by Rekor checkpoints, some CT logs
+// - RSA (PKCS#1, PSS) - Used by older CT logs and some Rekor instances
+//
+// Key format detection:
+// - PEM format (contains "BEGIN"): Parse with toDER()
+// - Hex string (all hex chars): Import as raw
+// - Base64 PKCS#1 (starts with 0x30 0x82...): Convert to SPKI
+// - Base64 SPKI: Import directly
 export async function importKey(
   keytype: string,
   scheme: string,
@@ -15,33 +86,32 @@ export async function importKey(
   class importParams {
     format: "raw" | "spki" = "spki";
     keyData: ArrayBuffer = new ArrayBuffer(0);
-    algorithm: {
-      name: "ECDSA" | "Ed25519" | "RSASSA-PKCS1-v1_5" | "RSA-PSS" | "RSA-OAEP";
-      namedCurve?: EcdsaTypes;
-    } = { name: "ECDSA" };
+    algorithm: RsaHashedImportParams | EcKeyImportParams | Algorithm = { name: "ECDSA" };
     extractable: boolean = true;
     usage: Array<KeyUsage> = ["verify"];
   }
 
   const params = new importParams();
-  // Let's try to detect the encoding
   if (key.includes("BEGIN")) {
-    // If it has a begin then it is a PEM
     params.format = "spki";
     params.keyData = toArrayBuffer(toDER(key));
   } else if (/^[0-9A-Fa-f]+$/.test(key)) {
-    // Is it hex?
     params.format = "raw";
     params.keyData = toArrayBuffer(hexToUint8Array(key));
   } else {
-    // It might be base64, without the PEM header, as in sigstore trusted_root
     params.format = "spki";
-    params.keyData = toArrayBuffer(base64ToUint8Array(key));
+    const keyBytes = base64ToUint8Array(key);
+
+    if (keytype.toLowerCase().includes("pkcs1") &&
+        keyBytes[0] === 0x30 && keyBytes[1] === 0x82 &&
+        keyBytes[4] === 0x02 && keyBytes[5] === 0x82) {
+      params.keyData = toArrayBuffer(pkcs1ToSpki(keyBytes));
+    } else {
+      params.keyData = toArrayBuffer(keyBytes);
+    }
   }
 
-  // Let's see supported key types
   if (keytype.toLowerCase().includes("ecdsa")) {
-    // Let'd find out the key size, and retrieve the proper naming for crypto.subtle
     if (scheme.includes("256")) {
       params.algorithm = { name: "ECDSA", namedCurve: EcdsaTypes.P256 };
     } else if (scheme.includes("384")) {
@@ -52,11 +122,30 @@ export async function importKey(
       throw new Error("Cannot determine ECDSA key size.");
     }
   } else if (keytype.toLowerCase().includes("ed25519")) {
-    // Ed2559 eys can be only one size, we do not need more info
     params.algorithm = { name: "Ed25519" };
-  } else if (keytype.toLowerCase().includes("rsa")) {
-    // Is it even worth to think of supporting it?
-    throw new Error("TODO (or maybe not): impleent RSA keys support.");
+  } else if (keytype.toLowerCase().includes("rsa") || keytype.toLowerCase().includes("pkcs1")) {
+    let hashName = HashAlgorithms.SHA256;
+    // Normalize scheme to handle various formats: SHA256, SHA_256, SHA-256, etc.
+    const normalizedScheme = scheme.toUpperCase().replace(/[-_]/g, "");
+    if (normalizedScheme.includes("SHA256") || normalizedScheme.includes("256")) {
+      hashName = HashAlgorithms.SHA256;
+    } else if (normalizedScheme.includes("SHA384") || normalizedScheme.includes("384")) {
+      hashName = HashAlgorithms.SHA384;
+    } else if (normalizedScheme.includes("SHA512") || normalizedScheme.includes("512")) {
+      hashName = HashAlgorithms.SHA512;
+    }
+
+    if (scheme.includes("PKCS1") || scheme.includes("RSA_PKCS1")) {
+      params.algorithm = {
+        name: "RSASSA-PKCS1-v1_5",
+        hash: { name: hashName },
+      };
+    } else {
+      params.algorithm = {
+        name: "RSA-PSS",
+        hash: { name: hashName },
+      };
+    }
   } else {
     throw new Error(`Unsupported ${keytype}`);
   }
@@ -86,20 +175,18 @@ export async function verifySignature(
   };
 
   if (key.algorithm.name === KeyTypes.Ecdsa) {
-    // Later we need to supply exactly sized R and R dependingont he curve for sig verification
     const namedCurve = (key.algorithm as EcKeyAlgorithm).namedCurve;
     let sig_size = 32;
 
-    if (namedCurve === "P-256") {
+    if (namedCurve === EcdsaTypes.P256) {
       sig_size = 32;
-    } else if (namedCurve === "P-384") {
+    } else if (namedCurve === EcdsaTypes.P384) {
       sig_size = 48;
-    } else if (namedCurve === "P-521") {
+    } else if (namedCurve === EcdsaTypes.P521) {
       sig_size = 66;
     }
 
     options.hash = { name: "" };
-    // Then we need to select an hashing algorithm
     if (hash.includes("256")) {
       options.hash.name = HashAlgorithms.SHA256;
     } else if (hash.includes("384")) {
@@ -110,26 +197,17 @@ export async function verifySignature(
       throw new Error("Cannot determine hashing algorithm;");
     }
 
-    // For posterity: this mess is because the web crypto API supports only
-    // IEEE P1363, so we etract r and s from the DER sig and manually ancode
-    // big endian and append them one after each other
-
-    // The verify option will do hashing internally
-    // const signed_digest = await crypto.subtle.digest(hash_alg, signed)
     let raw_signature: Uint8Array;
     try {
       const asn1_sig = ASN1Obj.parseBuffer(sig);
       const r = asn1_sig.subs[0].toInteger();
       const s = asn1_sig.subs[1].toInteger();
-      // Sometimes the integers can be less than the average, and we would miss bytes. The functione expects a finxed
-      // input in bytes depending on the curve, or it fails early.
       const binr = hexToUint8Array(r.toString(16).padStart(sig_size * 2, "0"));
       const bins = hexToUint8Array(s.toString(16).padStart(sig_size * 2, "0"));
       raw_signature = new Uint8Array(binr.length + bins.length);
       raw_signature.set(binr, 0);
       raw_signature.set(bins, binr.length);
     } catch {
-      // Signature is probably malformed
       return false;
     }
 
@@ -140,24 +218,93 @@ export async function verifySignature(
       toArrayBuffer(signed),
     );
   } else if (key.algorithm.name === KeyTypes.Ed25519) {
-    // No need to specify hash in this case, the crypto API does not take it as input for this key type
-    throw new Error(
-      "This is untested but could likely work, but not for prod usage :)",
+    // Ed25519 uses raw signatures (not DER-encoded like ECDSA)
+    // Fulcio supports Ed25519, ECDSA, and RSA_PSS for signing certificates
+    // Ed25519 is also used for checkpoint signatures in TLog configurations
+    return await crypto.subtle.verify(
+      key.algorithm.name,
+      key,
+      toArrayBuffer(sig),
+      toArrayBuffer(signed),
     );
-  } else if (key.algorithm.name === KeyTypes.RSA) {
-    throw new Error("RSA could work, if only someone coded the support :)");
+  } else if (key.algorithm.name === "RSA-PSS") {
+    // Salt length must match the hash output size
+    const hashAlg = (key.algorithm as RsaHashedKeyAlgorithm).hash.name;
+    const saltLength = hashAlg === HashAlgorithms.SHA256 ? 32 :
+                       hashAlg === HashAlgorithms.SHA384 ? 48 :
+                       hashAlg === HashAlgorithms.SHA512 ? 64 : 32;
+    return await crypto.subtle.verify(
+      {
+        name: "RSA-PSS",
+        saltLength: saltLength,
+      },
+      key,
+      toArrayBuffer(sig),
+      toArrayBuffer(signed),
+    );
+  } else if (key.algorithm.name === "RSASSA-PKCS1-v1_5") {
+    return await crypto.subtle.verify(
+      key.algorithm.name,
+      key,
+      toArrayBuffer(sig),
+      toArrayBuffer(signed),
+    );
   } else {
     throw new Error("Unsupported key type!");
   }
 }
 
-export function bufferEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) {
-    return false;
+// Verifies an ECDSA signature over a pre-computed digest.
+// WebCrypto's verify() always hashes the input first, so passing a digest would
+// result in double-hashing. We use @noble/curves for low-level ECDSA verification,
+// adapted from the same workaround used in sigstore-js's conformance CLI.
+// See: https://github.com/sigstore/sigstore-js/blob/main/packages/conformance/src/commands/verify-bundle.ts#L111
+export async function verifySignatureOverDigest(
+  key: CryptoKey,
+  digest: Uint8Array,
+  sig: Uint8Array,
+): Promise<boolean> {
+  if (key.algorithm.name !== KeyTypes.Ecdsa) {
+    throw new Error("verifySignatureOverDigest only supports ECDSA keys");
   }
 
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false;
+  const namedCurve = (key.algorithm as EcKeyAlgorithm).namedCurve;
+  let curve: typeof p256 | typeof p384 | typeof p521;
+
+  if (namedCurve === EcdsaTypes.P256) {
+    curve = p256;
+  } else if (namedCurve === EcdsaTypes.P384) {
+    curve = p384;
+  } else if (namedCurve === EcdsaTypes.P521) {
+    curve = p521;
+  } else {
+    throw new Error(`Unsupported curve: ${namedCurve}`);
   }
-  return true;
+
+  // Export the public key to get x and y coordinates
+  const jwk = await crypto.subtle.exportKey("jwk", key);
+  if (!jwk.x || !jwk.y) {
+    throw new Error("Invalid ECDSA public key: missing x or y coordinates");
+  }
+
+  // Convert base64url JWK coordinates to bytes
+  const x = base64UrlToUint8Array(jwk.x);
+  const y = base64UrlToUint8Array(jwk.y);
+
+  // Combine x and y into uncompressed public key format (0x04 || x || y)
+  const publicKey = new Uint8Array(1 + x.length + y.length);
+  publicKey[0] = 0x04;
+  publicKey.set(x, 1);
+  publicKey.set(y, 1 + x.length);
+
+  // Verify the DER-encoded signature over the digest
+  // @noble/curves can parse DER signatures directly with format: 'der'
+  // Options:
+  // - format: 'der' to parse DER-encoded signatures
+  // - prehash: false because we're passing a pre-computed digest, not the original message
+  // - lowS: false to accept both high-S and low-S signatures (matches elliptic.js behavior)
+  //   elliptic.js accepts malleable signatures by default, while @noble/curves rejects them by default
+  return curve.verify(sig, digest, publicKey, { format: 'der', prehash: false, lowS: false });
 }
+
+export { uint8ArrayEqual as bufferEqual } from "./encoding.js";

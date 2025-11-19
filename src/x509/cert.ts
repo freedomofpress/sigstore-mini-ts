@@ -17,12 +17,13 @@ import { ASN1Obj } from "../asn1/index.js";
 import { bufferEqual, importKey, verifySignature } from "../crypto.js";
 import { Uint8ArrayToBase64 } from "../encoding.js";
 import { KeyTypes } from "../interfaces.js";
-import { ECDSA_CURVE_NAMES, ECDSA_SIGNATURE_ALGOS } from "../oid.js";
+import { ECDSA_CURVE_NAMES, ECDSA_SIGNATURE_ALGOS, RSA_SIGNATURE_ALGOS } from "../oid.js";
 import * as pem from "../pem.js";
 import {
   X509AuthorityKeyIDExtension,
   X509BasicConstraintsExtension,
   X509Extension,
+  X509FulcioIssuerV1,
   X509FulcioIssuerV2,
   X509KeyUsageExtension,
   X509SCTExtension,
@@ -36,7 +37,8 @@ const EXTENSION_OID_KEY_USAGE = "2.5.29.15";
 const EXTENSION_OID_SUBJECT_ALT_NAME = "2.5.29.17";
 const EXTENSION_OID_BASIC_CONSTRAINTS = "2.5.29.19";
 const EXTENSION_OID_AUTHORITY_KEY_ID = "2.5.29.35";
-const EXTENSION_OID_FULCIO_ISSUERV2 = "1.3.6.1.4.1.57264.1.8";
+const EXTENSION_OID_FULCIO_ISSUER_V1 = "1.3.6.1.4.1.57264.1.1";
+const EXTENSION_OID_FULCIO_ISSUER_V2 = "1.3.6.1.4.1.57264.1.8";
 
 export const EXTENSION_OID_SCT = "1.3.6.1.4.1.11129.2.4.2";
 
@@ -89,12 +91,41 @@ export class X509Certificate {
     return this.subjectPublicKeyInfoObj.toDER();
   }
 
-  get publicKeyObj(): Promise<CryptoKey> {
+  /**
+   * Import the public key with a specific hash algorithm for RSA keys
+   * For ECDSA keys, the hash parameter is ignored
+   */
+  public async getPublicKeyObj(hashAlg?: string): Promise<CryptoKey> {
     const publicKey = this.subjectPublicKeyInfoObj.toDER();
-    const curve =
-      ECDSA_CURVE_NAMES[ASN1Obj.parseBuffer(publicKey).subs[0].subs[1].toOID()];
+    const spki = ASN1Obj.parseBuffer(publicKey);
+    const algorithmOID = spki.subs[0].subs[0].toOID();
 
-    return importKey(KeyTypes.Ecdsa, curve, Uint8ArrayToBase64(publicKey));
+    // Check if it's an RSA key (OID 1.2.840.113549.1.1.1)
+    if (algorithmOID === "1.2.840.113549.1.1.1") {
+      // RSA key - use provided hash or default to SHA-256
+      const hash = hashAlg || "sha256";
+      let scheme: string;
+      if (hash.includes("384")) {
+        scheme = "SHA384";
+      } else if (hash.includes("512")) {
+        scheme = "SHA512";
+      } else {
+        scheme = "SHA256";
+      }
+      return importKey("RSA", `RSA_PKCS1V5_${scheme}`, Uint8ArrayToBase64(publicKey));
+    } else {
+      // ECDSA key - the curve OID is in the second element
+      const curveOID = spki.subs[0].subs[1]?.toOID();
+      const curve = ECDSA_CURVE_NAMES[curveOID];
+      if (!curve) {
+        throw new Error(`Unknown ECDSA curve OID: ${curveOID}`);
+      }
+      return importKey(KeyTypes.Ecdsa, curve, Uint8ArrayToBase64(publicKey));
+    }
+  }
+
+  get publicKeyObj(): Promise<CryptoKey> {
+    return this.getPublicKeyObj();
   }
 
   get signatureAlgorithm(): string {
@@ -151,9 +182,13 @@ export class X509Certificate {
     return ext ? new X509SCTExtension(ext) : undefined;
   }
 
-  // TODO, improve this, support v1, do not force undefined
+  get extFulcioIssuerV1(): X509FulcioIssuerV1 | undefined {
+    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUER_V1);
+    return ext ? new X509FulcioIssuerV1(ext) : undefined;
+  }
+
   get extFulcioIssuerV2(): X509FulcioIssuerV2 | undefined {
-    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUERV2);
+    const ext = this.findExtension(EXTENSION_OID_FULCIO_ISSUER_V2);
     return ext ? new X509FulcioIssuerV2(ext) : undefined;
   }
 
@@ -165,8 +200,6 @@ export class X509Certificate {
       return ca && this.extKeyUsage.keyCertSign;
     }
 
-    // TODO: test coverage for this case
-    /* istanbul ignore next */
     return ca;
   }
 
@@ -176,10 +209,16 @@ export class X509Certificate {
   }
 
   public async verify(issuerCertificate?: X509Certificate): Promise<boolean> {
-    // Use the issuer's public key if provided, otherwise use the subject's
-    // We should probably check notbefore/notafter here
-    const publicKeyObj =
-      (await issuerCertificate?.publicKeyObj) || (await this.publicKeyObj);
+    // Extract the hash algorithm from this certificate's signature algorithm
+    // (not the issuer's own signature algorithm)
+    const sigAlgOID = this.signatureAlgorithmObj.subs[0].toOID();
+    const hashAlg = RSA_SIGNATURE_ALGOS[sigAlgOID] || ECDSA_SIGNATURE_ALGOS[sigAlgOID];
+
+    // Use the issuer's public key if provided, otherwise use the subject's (for self-signed certs)
+    // Import with the correct hash algorithm for this certificate's signature
+    const publicKeyObj = issuerCertificate
+      ? await issuerCertificate.getPublicKeyObj(hashAlg)
+      : await this.getPublicKeyObj(hashAlg);
 
     return await verifySignature(
       publicKeyObj,

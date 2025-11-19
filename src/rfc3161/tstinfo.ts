@@ -16,6 +16,7 @@ limitations under the License.
 import { ASN1Obj } from "../asn1/index.js";
 import { bufferEqual } from "../crypto.js";
 import { toArrayBuffer } from "../encoding.js";
+import { HashAlgorithms } from "../interfaces.js";
 import { SHA2_HASH_ALGOS } from "../oid.js";
 import { RFC3161TimestampVerificationError } from "./error.js";
 
@@ -36,7 +37,11 @@ export class TSTInfo {
 
   get messageImprintHashAlgorithm(): string {
     const oid = this.messageImprintObj.subs[0].subs[0].toOID();
-    return SHA2_HASH_ALGOS[oid];
+    const algo = SHA2_HASH_ALGOS[oid];
+    if (!algo) {
+      throw new Error(`Unknown message imprint hash algorithm OID: ${oid}`);
+    }
+    return algo;
   }
 
   get messageImprintHashedMessage(): Uint8Array {
@@ -48,8 +53,15 @@ export class TSTInfo {
   }
 
   public async verify(data: Uint8Array): Promise<void> {
+    const hashAlg = this.messageImprintHashAlgorithm;
+
+    // Convert hash algorithm name to the format expected by WebCrypto
+    const hashAlgName = hashAlg === "sha256" ? HashAlgorithms.SHA256 :
+                       hashAlg === "sha384" ? HashAlgorithms.SHA384 :
+                       hashAlg === "sha512" ? HashAlgorithms.SHA512 : hashAlg;
+
     const digest = await crypto.subtle.digest(
-      this.messageImprintHashAlgorithm,
+      hashAlgName,
       toArrayBuffer(data),
     );
     if (

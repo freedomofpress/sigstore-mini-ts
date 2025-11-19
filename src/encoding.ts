@@ -41,10 +41,18 @@ export function base64ToUint8Array(base64: string): Uint8Array {
   const bytes = new Uint8Array(length);
 
   for (let i = 0; i < length; i++) {
-    bytes[i] = binaryString.charCodeAt(i); // Convert binary string to byte array
+    bytes[i] = binaryString.charCodeAt(i);
   }
 
   return bytes;
+}
+
+export function base64UrlToUint8Array(base64url: string): Uint8Array {
+  let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4 !== 0) {
+    base64 += '=';
+  }
+  return base64ToUint8Array(base64);
 }
 
 export function Uint8ArrayToBase64(uint8Array: Uint8Array): string {
@@ -92,33 +100,9 @@ export function stringToUint8Array(str: string): Uint8Array {
   return encoder.encode(str);
 }
 
-// This is silly, but it is a hack to be consistent with the original test suite
 export function Uint8ArrayToString(uint8Array: Uint8Array): string {
-  const decoder = new TextDecoder("ascii");
+  const decoder = new TextDecoder("utf-8");
   return decoder.decode(uint8Array);
-}
-
-// TODO Why does this function fails in SCTs?
-// I had to swap it for the one below...
-export function readBigInt64BEold(
-  uint8Array: Uint8Array,
-  offset?: number,
-): bigint {
-  if (!offset) {
-    offset = 0;
-  }
-  const high =
-    (uint8Array[offset] << 24) |
-    (uint8Array[offset + 1] << 16) |
-    (uint8Array[offset + 2] << 8) |
-    uint8Array[offset + 3];
-  const low =
-    (uint8Array[offset + 4] << 24) |
-    (uint8Array[offset + 5] << 16) |
-    (uint8Array[offset + 6] << 8) |
-    uint8Array[offset + 7];
-  const value = (BigInt(high) << BigInt(32)) + BigInt(low);
-  return value;
 }
 
 export function readBigInt64BE(
@@ -138,4 +122,20 @@ export function base64Encode(str: string): string {
 
 export function base64Decode(str: string): string {
   return Uint8ArrayToString(base64ToUint8Array(str));
+}
+
+/**
+ * Constant-time equality comparison for Uint8Arrays
+ * Prevents timing attacks by always comparing all bytes
+ */
+export function uint8ArrayEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) {
+    return false;
+  }
+
+  let result = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    result |= a[i] ^ b[i];
+  }
+  return result === 0;
 }

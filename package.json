@@ -1,9 +1,15 @@
 {
-  "name": "sigstor-mini-ts",
-  "version": "0.1",
-  "description": "A Sigstore minal verifier, with node and browser support.",
-  "main": "dist/cli.js",
+  "name": "sigstore-browser",
+  "version": "0.1.0",
+  "description": "A minimal browser-only Sigstore verification library.",
+  "main": "dist/index.js",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -19,15 +25,15 @@
   "author": "Giulio B",
   "license": "MIT",
   "devDependencies": {
-    "@types/firefox": "^0.0.34",
-    "@types/firefox-webext-browser": "^120.0.4",
     "@types/node": "^24.0.14",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
     "typescript": "^5.8.3",
+    "typescript-eslint": "^8.37.0",
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "@vitest/coverage-v8": "^3.2.4",
-    "eslint-plugin-simple-import-sort": "^12.1.1",
-    "typescript-eslint": "^8.37.0"
+    "@noble/curves": "^2.0.1",
+    "tuf-browser": "^0.1.1"
   }
 }

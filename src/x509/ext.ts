@@ -163,6 +163,16 @@ export class X509SubjectKeyIDExtension extends X509Extension {
   }
 }
 
+// Fulcio Issuer V1 extension - OID 1.3.6.1.4.1.57264.1.1
+// Simple OCTET STRING containing the issuer
+export class X509FulcioIssuerV1 extends X509Extension {
+  get issuer(): string {
+    return Uint8ArrayToString(this.extnValueObj.value);
+  }
+}
+
+// Fulcio Issuer V2 extension - OID 1.3.6.1.4.1.57264.1.8
+// SEQUENCE containing the issuer as the first element
 export class X509FulcioIssuerV2 extends X509Extension {
   get issuer(): string {
     return Uint8ArrayToString(this.extnValueObj.subs[0].value);
